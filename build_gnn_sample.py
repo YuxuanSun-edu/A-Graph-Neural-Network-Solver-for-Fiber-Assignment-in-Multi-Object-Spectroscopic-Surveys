@@ -28,7 +28,7 @@ from reduction import (
 )
 
 from CHILS import (
-    chils_initial_solution,
+    chils_solver,
     build_adj_list,
 )
 
@@ -99,11 +99,11 @@ def build_training_graph_for_one_instance(
     sol_reduced = []
     if generate_label:
         # print(f"  -> 运行 CHILS (iter={max_outer_iter})...")
-        sol_reduced = chils_initial_solution(
-            reduced_instance,
-            max_outer_iter=max_outer_iter,
-            random_seed=random_seed,
-        )
+        sol_reduced = chils_solver(
+    reduced_instance, 
+    num_workers=4,          # 根据你的 CPU 核心数调整
+    iters_per_worker=100    # 迭代次数越多，标签质量越高，但速度越慢
+)
     
     y = np.zeros(n_reduced, dtype=np.int64)
     if generate_label and sol_reduced:
