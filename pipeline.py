@@ -1,4 +1,4 @@
-# pipeline.py 
+# pipeline.py (最终修复版 - 解决 train_npz_dir 报错)
 import os
 import re
 import argparse
@@ -155,6 +155,7 @@ def main():
     # ========================================================
     if args.train:
         print("\n>>> [Phase 2] 模型训练/微调...")
+        # 【关键修复】这里把参数名改回 npz_dir，与 train.py 保持一致
         run_training_pipeline(
             npz_dir=processed_dir, 
             save_path=model_path if os.path.exists(model_path) else os.path.join(MODELS_DIR, "best_mis_gnn.pt"), 
@@ -225,6 +226,7 @@ def main():
         success = False
         
         try:
+            # 【关键修复】只传兼容的参数，不传 effort
             solve_one_npz(
                 npz_path=npz_p,
                 items_path=items_p,
