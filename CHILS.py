@@ -1,32 +1,77 @@
-# CHILS.py
 import os
 import random
-from typing import List, Set
+import copy
+from concurrent.futures import ProcessPoolExecutor
+from typing import List, Set, Tuple
 
-# 从 reduction.py 导入内容
-from reduction import (
-    load_items_from_file,
-    load_limits_from_file,
-    ProblemInstance,
-    Reducer,
-)
+from reduction import ProblemInstance, Reducer, load_items_from_file, load_limits_from_file
 
 # ============================================================
-# 1. 基于 groups 构造邻接表（给 Python-CHILS 用）
+# 1. 核心算子：更强的局部搜索 (1-for-k Swap)
 # ============================================================
 
-def build_adj_list(instance: ProblemInstance):
+def local_search_refinement(instance: ProblemInstance, current_sol: Set[int], adj: List[Set[int]]) -> Set[int]:
+    """
+    改进当前的独立集：通过 1-for-k 交换寻找更高权重的邻域解
+    """
+    items = instance.items
+    weights = [it[2] for it in items]
+    n = len(items)
+    
+    improved = True
+    best_sol = set(current_sol)
+    best_w = sum(weights[i] for i in best_sol)
+
+    while improved:
+        improved = False
+        # 遍历所有不在当前解中的点
+        candidates = list(set(range(n)) - best_sol)
+        # 启发式排序：优先尝试高权重的点
+        candidates.sort(key=lambda u: weights[u], reverse=True)
+
+        for u in candidates:
+            # 找到与 u 冲突的当前解中的节点
+            conflicts = [v for v in adj[u] if v in best_sol]
+            conflicts_w = sum(weights[v] for v in conflicts)
+
+            # 如果加入 u 并移除冲突点后，总权重增加，则执行交换
+            if weights[u] > conflicts_w:
+                for v in conflicts:
+                    best_sol.remove(v)
+                best_sol.add(u)
+                best_w = best_w - conflicts_w + weights[u]
+                improved = True
+                break # 立即进入下一轮迭代
+    return best_sol
+
+# ============================================================
+# 2. 扰动算子 (Perturbation)：跳出局部最优的关键
+# ============================================================
+
+def perturb(current_sol: Set[int], adj: List[Set[int]], strength: float = 0.1) -> Set[int]:
+    """
+    随机移除一部分节点，并重新通过贪心填补，产生新的搜索起点
+    """
+    new_sol = set(current_sol)
+    num_to_remove = max(1, int(len(current_sol) * strength))
+    
+    # 随机移除
+    to_remove = random.sample(list(current_sol), num_to_remove)
+    for r in to_remove:
+        new_sol.remove(r)
+        
+    return new_sol
+
+def build_adj_list(instance):
     """
     根据 groups 构造图的邻接表：
       - 节点：0..n-1
       - 每个 group 视作 clique，在组内两两连边
-    返回：
-      adj: List[set]，adj[u] 是与 u 相邻的节点集合
     """
     n = len(instance.items)
     groups = instance.groups
 
-    adj: List[Set[int]] = [set() for _ in range(n)]
+    adj = [set() for _ in range(n)]
     for g in groups:
         for i in range(len(g)):
             u = g[i]
@@ -38,104 +83,86 @@ def build_adj_list(instance: ProblemInstance):
                 adj[v].add(u)
     return adj
 
-
 # ============================================================
-# 2. Python 版 CHILS：加权贪心 + 简单局部搜索
+# 3. 单线程 ILS 实例 (Worker)
 # ============================================================
 
-def chils_initial_solution(instance: ProblemInstance,
-                           max_outer_iter: int = 50,
-                           random_seed: int = 42):
+def ils_worker(instance_data: Tuple[ProblemInstance, List[Set[int]], int, int]) -> Set[int]:
     """
-    CHILS  MWIS 初解：
-      1) 加权贪心构造一个独立集
-      2) 通过简单的 1 对 k 交换局部搜索提升总权重
-
-    返回：
-      solution: List[int]  独立集节点索引（基于 reduced_instance 的索引）
+    单个进程执行的迭代局部搜索
     """
-    random.seed(random_seed)
-
+    instance, adj, max_iters, seed = instance_data
+    random.seed(seed)
+    
+    # 1. 初始解生成 (使用带随机扰动的加权贪心)
     items = instance.items
+    weights = [it[2] for it in items]
     n = len(items)
-    weights = [it[2] for it in items]  # weight = 第三个元素
+    
+    def get_initial():
+        sol = set()
+        rem = set(range(n))
+        while rem:
+            u = max(rem, key=lambda x: weights[x] / (1.0 + len(adj[x]) + random.random()*0.1))
+            sol.add(u)
+            rem -= ({u} | adj[u])
+        return sol
 
-    # 1. 构造邻接表
+    current_sol = get_initial()
+    current_sol = local_search_refinement(instance, current_sol, adj)
+    best_sol = set(current_sol)
+    best_w = sum(weights[i] for i in best_sol)
+
+    # 2. 迭代环
+    for _ in range(max_iters):
+        # 扰动 + 局部搜索
+        perturbed_sol = perturb(current_sol, adj)
+        # 填补由于扰动留下的空间
+        rem = set(range(n)) - perturbed_sol
+        for node in perturbed_sol:
+            rem -= adj[node]
+        while rem:
+            u = max(rem, key=lambda x: weights[x] / (1.0 + len(adj[x])))
+            perturbed_sol.add(u)
+            rem -= ({u} | adj[u])
+            
+        candidate_sol = local_search_refinement(instance, perturbed_sol, adj)
+        candidate_w = sum(weights[i] for i in candidate_sol)
+
+        # 接受准则 (这里使用单纯的爬山，也可以改用类似 SA 的概率接受)
+        if candidate_w > best_w:
+            best_sol = set(candidate_sol)
+            best_w = candidate_w
+            current_sol = set(candidate_sol)
+        
+    return best_sol
+
+# ============================================================
+# 4. 真正的并发 CHILS 入口
+# ============================================================
+
+def chils_solver(instance: ProblemInstance, num_workers: int = 4, iters_per_worker: int = 100):
+    """
+    Concurrent Hybrid Iterated Local Search
+    """
     adj = build_adj_list(instance)
-    degrees = [len(adj[i]) for i in range(n)]
+    
+    print(f"[CHILS] 启动 {num_workers} 个并发搜索进程...")
+    
+    # 准备每个进程的参数
+    worker_args = [(instance, adj, iters_per_worker, random.randint(0, 10000)) for _ in range(num_workers)]
+    
+    best_global_sol = set()
+    best_global_w = 0
 
-    # -------- Step 1: 加权贪心构造初解 --------
-    remaining = set(range(n))
-    solution = set()
-
-    while remaining:
-        best_node = None
-        best_score = -1.0
-        for u in remaining:
-            # CHILS 思路：度越小、权重越大越优先
-            score = weights[u] / (1.0 + degrees[u])
-            if score > best_score:
-                best_score = score
-                best_node = u
-
-        if best_node is None:
-            break
-
-        solution.add(best_node)
-        # 删掉自己和所有邻居，保证独立集
-        to_remove = {best_node} | adj[best_node]
-        remaining -= to_remove
-
-    def total_weight(sol_set):
-        return sum(weights[u] for u in sol_set)
-
-    print(f"[CHILS-Py] 贪心初解：|S| = {len(solution)}, weight = {total_weight(solution):.3f}")
-
-    # -------- Step 2: 简单局部搜索（1 对 k 交换） --------
-    best_solution = set(solution)
-    best_w = total_weight(best_solution)
-
-    for it in range(max_outer_iter):
-        improved = False
-
-        # 只在“未选中的点”中尝试引入高权点
-        candidates = list(set(range(n)) - best_solution)
-        candidates.sort(key=lambda u: weights[u], reverse=True)
-
-        for u in candidates:
-            # 与当前解中冲突的节点
-            conflict_nodes = [v for v in adj[u] if v in best_solution]
-
-            if not conflict_nodes:
-                # 完全不冲突，直接加入
-                new_solution = set(best_solution)
-                new_solution.add(u)
-            else:
-                # 删除与 u 冲突的所有点，再加入 u（1 对 k 交换）
-                new_solution = set(best_solution)
-                for v in conflict_nodes:
-                    new_solution.remove(v)
-                new_solution.add(u)
-
-            new_w = total_weight(new_solution)
-            if new_w > best_w:
-                best_solution = new_solution
-                best_w = new_w
-                improved = True
-                break  # 找到一次改进就结束本轮，重新开始下一轮
-
-        print(f"[CHILS-Py] 迭代 {it+1}/{max_outer_iter}, 当前 weight = {best_w:.3f}, |S| = {len(best_solution)}")
-
-        if not improved:
-            print("[CHILS-Py] 未找到更优邻域解，局部搜索结束。")
-            break
-
-    final_solution = sorted(best_solution)
-    print(f"[CHILS-Py] 最终解：|S| = {len(final_solution)}, weight = {best_w:.3f}")
-    return final_solution
-
-
-# ============================================================
-# 3. 主入口：Reduction + CHILS-Py + 还原到原始 items
-# ============================================================
-
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        results = list(executor.map(ils_worker, worker_args))
+        
+    weights = [it[2] for it in instance.items]
+    for sol in results:
+        w = sum(weights[i] for i in sol)
+        if w > best_global_w:
+            best_global_w = w
+            best_global_sol = sol
+            
+    return sorted(list(best_global_sol))
