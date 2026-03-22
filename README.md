@@ -14,6 +14,7 @@
 ├── TSO.py                 # 基于网络流的基线算法 (Two-Stage Optimization)
 ├── compare.py             # 多算法对比测试框架 (Greedy/SA/GA)
 └── build.py               # 批量构建训练数据的命令行工具
+text```
 
 如果你想循环自动化训练（使用我们的自动化数据生成）
 --python auto_train_loop.py
